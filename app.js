@@ -33,6 +33,8 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const col = st => "var(" + (STYLE_VAR[st] || "--other") + ")";
 const t = (k, ...a) => { const v = STRINGS[S.lang][k] ?? STRINGS.en[k]; return typeof v === "function" ? v(...a) : v; };
+// An event can have several styles; older events only have one.
+const stylesOf = e => (Array.isArray(e.styles) && e.styles.length ? e.styles : [e.style || "Other"]);
 const isOrganiser = () => !!S.profile && ["organiser", "admin"].includes(S.profile.role);
 const uid = () => S.session?.user?.id || null;
 
@@ -92,7 +94,7 @@ function status(e, now) {
    ============================================================ */
 function visible(now) {
   return S.events.filter(e => ms(e.ends_at) > now)
-    .filter(e => S.style === "All" || e.style === S.style)
+    .filter(e => S.style === "All" || stylesOf(e).includes(S.style))
     .sort((a, b) => ms(a.starts_at) - ms(b.starts_at));
 }
 
@@ -124,7 +126,7 @@ function renderAccount() {
 function renderClock() { $("clock").textContent = bkkTime(Date.now()); }
 
 function renderStyles() {
-  const used = new Set(S.events.map(e => e.style));
+  const used = new Set(S.events.flatMap(stylesOf));
   const list = ["All", ...STYLES.filter(s => used.has(s))];
   if (!list.includes(S.style)) S.style = "All";
   $("styles").innerHTML = list.map(s => `<button class="chip" data-style="${esc(s)}" aria-pressed="${s === S.style}">${s === "All" ? "" : `<span class="dot" style="--c:${col(s)}"></span>`}${esc(s === "All" ? t("allStyles") : s)}</button>`).join("");
@@ -161,7 +163,7 @@ function renderList(now) {
       html += `<article class="ev ${e.status === "cancelled" ? "cancelled" : ""} ${S.selected === e.id ? "sel" : ""}" data-id="${esc(e.id)}" tabindex="0">
         <div class="time"><b>${bkkTime(e.starts_at)}</b><span>${esc(t("to"))} ${bkkTime(e.ends_at)}</span></div>
         <div class="meta">
-          <span class="style-tag" style="--c:${col(e.style)}"><span class="dot"></span>${esc(e.style)}</span>
+          <span class="style-tags">${stylesOf(e).map(st => `<span class="style-tag" style="--c:${col(st)}"><span class="dot"></span>${esc(st)}</span>`).join("")}</span>
           <span class="title">${esc(e.title)}</span>
           ${e.host ? `<span class="host">${esc(t("by"))} ${esc(e.host)}</span>` : ""}
           <span class="sub"><span>${esc(e.venue)}${e.area ? ", " + esc(e.area) : ""}</span>${dist ? `<span>${esc(dist)}</span>` : ""}${e.lesson ? `<span>${esc(t("classAt"))} ${esc(e.lesson)}</span>` : ""}${e.price_text ? `<span>${esc(e.price_text)}</span>` : ""}</span>
@@ -195,7 +197,7 @@ function renderMap(now) {
   for (const e of visible(now)) {
     if (e.lat == null || e.lng == null) continue;
     const sel = S.selected === e.id, live = e.status !== "cancelled" && now >= ms(e.starts_at) && now < ms(e.ends_at);
-    const color = e.status === "cancelled" ? css.getPropertyValue("--bad").trim() : css.getPropertyValue(STYLE_VAR[e.style] || "--other").trim();
+    const color = e.status === "cancelled" ? css.getPropertyValue("--bad").trim() : css.getPropertyValue(STYLE_VAR[stylesOf(e)[0]] || "--other").trim();
     if (live) L.circleMarker([e.lat, e.lng], { radius: 16, stroke: false, fillColor: css.getPropertyValue("--live").trim(), fillOpacity: .25, interactive: false }).addTo(markerLayer);
     const m = L.circleMarker([e.lat, e.lng], { radius: sel ? 10 : 7, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1 }).addTo(markerLayer);
     m.bindTooltip(`${esc(e.title)} · ${bkkTime(e.starts_at)}`, { direction: "top", offset: [0, -8], permanent: sel });
@@ -260,7 +262,7 @@ function editorHtml() {
   return `<h3>${esc(S.mode === "new" ? t("newEvent") : t("editEvent"))}</h3>
   <form class="edit" id="editForm">
     <label class="full" for="f-title">${esc(t("fTitle"))}<input id="f-title" required maxlength="80" value="${esc(d.title)}"></label>
-    <label for="f-style">${esc(t("fStyle"))}<select id="f-style">${opt(d.style, STYLES)}</select></label>
+    <fieldset class="full style-picks"><legend>${esc(t("fStyle"))}</legend>${STYLES.map((st, i) => `<label class="pick" for="f-st-${i}"><input type="checkbox" id="f-st-${i}" name="f-styles" value="${esc(st)}" ${stylesOf(d).includes(st) ? "checked" : ""}><span class="dot" style="--c:${col(st)}"></span>${esc(st)}</label>`).join("")}</fieldset>
     <label for="f-status">${esc(t("fStatus"))}<select id="f-status"><option value="on" ${d.status !== "cancelled" ? "selected" : ""}>${esc(t("fOn"))}</option><option value="cancelled" ${d.status === "cancelled" ? "selected" : ""}>${esc(t("fCancelled"))}</option></select></label>
     <label for="f-date">${esc(t("fDate"))}<input id="f-date" type="date" required value="${esc(d.date)}"></label>
     <label for="f-lesson">${esc(t("fLesson"))}<input id="f-lesson" placeholder="Beginner 19:15" value="${esc(d.lesson)}"></label>
@@ -381,7 +383,7 @@ function buyTicket() {
 
 function startEdit(isNew) {
   if (isNew) {
-    draft = { title: "", style: "Salsa", status: "on", date: bkkDate(Date.now()), start: "20:00", end: "23:30", venue: "", area: "", lesson: "", price_text: "", host: S.profile?.display_name || "", host_link: "", note: "", lat: null, lng: null };
+    draft = { title: "", style: "Salsa", styles: ["Salsa"], status: "on", date: bkkDate(Date.now()), start: "20:00", end: "23:30", venue: "", area: "", lesson: "", price_text: "", host: S.profile?.display_name || "", host_link: "", note: "", lat: null, lng: null };
   } else {
     const e = S.events.find(x => x.id === S.selected); if (!e) return;
     draft = { ...e, date: bkkDate(e.starts_at), start: bkkTime(e.starts_at), end: bkkTime(e.ends_at) };
@@ -395,12 +397,14 @@ async function save(evt) {
   evt.preventDefault();
   if (S.busy) return;
   const v = id => $(id).value.trim();
+  const picked = [...document.querySelectorAll('input[name="f-styles"]:checked')].map(x => x.value);
+  if (!picked.length) { toast(t("pickStyle")); return; }
   const nums = v("f-coords").split(/[,\s]+/).map(Number).filter(n => Number.isFinite(n) && n !== 0);
   const starts = toIso(v("f-date"), v("f-start"));
   let ends = toIso(v("f-date"), v("f-end"));
   if (ms(ends) <= ms(starts)) ends = new Date(ms(ends) + 86400e3).toISOString();   // runs past midnight
   const body = {
-    title: v("f-title"), style: v("f-style"), status: v("f-status"), starts_at: starts, ends_at: ends,
+    title: v("f-title"), style: picked[0], styles: picked, status: v("f-status"), starts_at: starts, ends_at: ends,
     venue: v("f-venue"), area: v("f-area") || null, lesson: v("f-lesson") || null, price_text: v("f-price") || null,
     host: v("f-host") || null, host_link: safeUrl(v("f-hostlink")) || null, note: v("f-note") || null,
     lat: nums.length === 2 ? nums[0] : null, lng: nums.length === 2 ? nums[1] : null
@@ -544,7 +548,7 @@ function demoEvents() {
     mk(3, "Milonga", "Tango", 3, "20:00", "00:00", null, "Salón Abrazo", "Phrom Phong", 13.7310, 100.5690, "350 THB"),
     mk(4, "Kizomba & Urban Kiz", "Kizomba", 4, "21:00", "01:00", "Improvers 20:00", "The Ginga Room", "Ekkamai", 13.7200, 100.5870, "300 THB"),
     mk(5, "Latin Night", "Salsa", 4, "21:30", "02:00", null, "Rooftop 11", "Sukhumvit 11", 13.7440, 100.5550, "400 THB incl. drink",
-      { note: "Salsa and bachata, 2:1", prev_starts_at: toIso(day(5), "21:00"), changed_at: new Date().toISOString() }),
+      { styles: ["Salsa", "Bachata"], note: "Salsa and bachata, 2:1", prev_starts_at: toIso(day(5), "21:00"), changed_at: new Date().toISOString() }),
     mk(6, "West Coast Social", "West Coast Swing", 5, "19:00", "22:30", "Open level 18:00", "Slot Studio", "Sathorn", 13.7230, 100.5290, "250 THB"),
     mk(7, "Zouk Afternoon", "Zouk", 6, "15:00", "19:00", null, "Onda Studio", "Ratchathewi", 13.7520, 100.5330, "250 THB", { tickets_enabled: true, ticket_price_thb: 250 })
   ];
