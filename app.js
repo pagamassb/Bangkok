@@ -61,6 +61,13 @@ function distText(e) {
   const o = origin(); if (!o || e.lat == null || e.lng == null) return "";
   return t("kmFrom", km(o.lat, o.lng, e.lat, e.lng).toFixed(1), o.label);
 }
+// Only allow normal web links (blocks javascript: and other tricks).
+function safeUrl(u) {
+  if (!u) return "";
+  let s = String(u).trim();
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  try { const x = new URL(s); return /^https?:$/.test(x.protocol) ? x.href : ""; } catch (_) { return ""; }
+}
 const mapsUrl = e => "https://www.google.com/maps/search/?api=1&query=" + (e.lat != null && e.lng != null ? `${e.lat},${e.lng}` : encodeURIComponent(`${e.venue || ""} Bangkok`));
 
 /* ============================================================
@@ -156,6 +163,7 @@ function renderList(now) {
         <div class="meta">
           <span class="style-tag" style="--c:${col(e.style)}"><span class="dot"></span>${esc(e.style)}</span>
           <span class="title">${esc(e.title)}</span>
+          ${e.host ? `<span class="host">${esc(t("by"))} ${esc(e.host)}</span>` : ""}
           <span class="sub"><span>${esc(e.venue)}${e.area ? ", " + esc(e.area) : ""}</span>${dist ? `<span>${esc(dist)}</span>` : ""}${e.lesson ? `<span>${esc(t("classAt"))} ${esc(e.lesson)}</span>` : ""}${e.price_text ? `<span>${esc(e.price_text)}</span>` : ""}</span>
           ${pills ? `<div class="pills">${pills}</div>` : ""}
         </div>
@@ -232,7 +240,7 @@ function renderDetail(now) {
       ${e.lesson ? `<dt>${esc(t("klass"))}</dt><dd>${esc(e.lesson)}</dd>` : ""}
       <dt>${esc(t("venue"))}</dt><dd>${esc(e.venue)}${e.area ? ", " + esc(e.area) : ""}${dist ? " · " + esc(dist) : ""}</dd>
       ${e.price_text ? `<dt>${esc(t("entry"))}</dt><dd>${esc(e.price_text)}</dd>` : ""}
-      ${e.host ? `<dt>${esc(t("host"))}</dt><dd>${esc(e.host)}</dd>` : ""}
+      ${e.host ? `<dt>${esc(t("host"))}</dt><dd>${safeUrl(e.host_link) ? `<a href="${esc(safeUrl(e.host_link))}" target="_blank" rel="noopener">${esc(e.host)} ↗</a>` : esc(e.host)}</dd>` : ""}
       ${e.note ? `<dt>${esc(t("note"))}</dt><dd>${esc(e.note)}</dd>` : ""}
       <dt>${esc(t("goingLabel"))}</dt><dd>${esc(t("dancers", e.going_count || 0))}</dd>
     </dl>
@@ -262,7 +270,8 @@ function editorHtml() {
     <label for="f-area">${esc(t("fArea"))}<input id="f-area" placeholder="Thong Lo" value="${esc(d.area)}"></label>
     <label class="full" for="f-coords">${esc(t("fCoords"))} <span class="hint">${esc(t("fCoordsHint"))}</span><input id="f-coords" inputmode="decimal" placeholder="13.7262, 100.5801" value="${d.lat != null && d.lng != null ? esc(d.lat + ", " + d.lng) : ""}"></label>
     <label for="f-price">${esc(t("fPrice"))}<input id="f-price" placeholder="300 THB incl. drink" value="${esc(d.price_text)}"></label>
-    <label for="f-host">${esc(t("fHost"))}<input id="f-host" value="${esc(d.host)}"></label>
+    <label for="f-host">${esc(t("fHost"))}<input id="f-host" required placeholder="Salsa BKK" value="${esc(d.host)}"></label>
+    <label class="full" for="f-hostlink">${esc(t("fHostLink"))} <span class="hint">${esc(t("fHostLinkHint"))}</span><input id="f-hostlink" type="text" inputmode="url" autocapitalize="off" placeholder="https://line.me/ti/p/… or https://instagram.com/…" value="${esc(d.host_link)}"></label>
     <label class="full" for="f-note">${esc(t("fNote"))}<textarea id="f-note" rows="2" placeholder="${esc(t("fNotePh"))}">${esc(d.note)}</textarea></label>
     <div class="full row">
       <button class="btn primary" type="submit" id="saveBtn">${esc(S.mode === "new" ? t("post") : t("save"))}</button>
@@ -372,7 +381,7 @@ function buyTicket() {
 
 function startEdit(isNew) {
   if (isNew) {
-    draft = { title: "", style: "Salsa", status: "on", date: bkkDate(Date.now()), start: "20:00", end: "23:30", venue: "", area: "", lesson: "", price_text: "", host: "", note: "", lat: null, lng: null };
+    draft = { title: "", style: "Salsa", status: "on", date: bkkDate(Date.now()), start: "20:00", end: "23:30", venue: "", area: "", lesson: "", price_text: "", host: S.profile?.display_name || "", host_link: "", note: "", lat: null, lng: null };
   } else {
     const e = S.events.find(x => x.id === S.selected); if (!e) return;
     draft = { ...e, date: bkkDate(e.starts_at), start: bkkTime(e.starts_at), end: bkkTime(e.ends_at) };
@@ -393,7 +402,7 @@ async function save(evt) {
   const body = {
     title: v("f-title"), style: v("f-style"), status: v("f-status"), starts_at: starts, ends_at: ends,
     venue: v("f-venue"), area: v("f-area") || null, lesson: v("f-lesson") || null, price_text: v("f-price") || null,
-    host: v("f-host") || null, note: v("f-note") || null,
+    host: v("f-host") || null, host_link: safeUrl(v("f-hostlink")) || null, note: v("f-note") || null,
     lat: nums.length === 2 ? nums[0] : null, lng: nums.length === 2 ? nums[1] : null
   };
   S.busy = true; $("saveBtn").disabled = true;
@@ -526,7 +535,7 @@ function demoEvents() {
   const day = n => { const d = new Date(`${today}T12:00:00+07:00`); d.setUTCDate(d.getUTCDate() + n); return bkkDate(d); };
   const mk = (i, title, style, d, s, e, lesson, venue, area, lat, lng, price, extra = {}) => {
     const starts = toIso(day(d), s); let ends = toIso(day(d), e); if (ms(ends) <= ms(starts)) ends = new Date(ms(ends) + 86400e3).toISOString();
-    return { id: "demo-" + i, title, style, status: "on", starts_at: starts, ends_at: ends, lesson, venue, area, lat, lng, price_text: price, host: "Example host", note: null, going_count: [12, 8, 15, 6, 9, 21, 7, 5][i] || 0, is_sample: true, tickets_enabled: false, ...extra };
+    return { id: "demo-" + i, title, style, status: "on", starts_at: starts, ends_at: ends, lesson, venue, area, lat, lng, price_text: price, host: ["Clave Crew","Sala Bachata","Hop Hall Swing","Tango Abrazo BKK","Ginga Kiz","Rooftop Latin","Slot WCS","Onda Zouk"][i], note: null, going_count: [12, 8, 15, 6, 9, 21, 7, 5][i] || 0, is_sample: true, tickets_enabled: false, ...extra };
   };
   return [
     mk(0, "Salsa Social", "Salsa", 0, "20:00", "00:30", "Beginner 19:15", "Casa Clave", "Thong Lo", 13.7262, 100.5801, "300 THB incl. drink"),
