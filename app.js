@@ -187,17 +187,44 @@ function initMap() {
   markerLayer = L.layerGroup().addTo(map);
   hereLayer = L.layerGroup().addTo(map);
 }
-// English: CARTO Voyager (street and place names in English).
-// Thai: standard OpenStreetMap (names in Thai).
+// Base map: OpenFreeMap (free, no key, commercial use allowed), drawn with MapLibre.
+// Place and street names follow the site language: English or Thai.
+// Falls back to standard OpenStreetMap (Thai names) if MapLibre can't load.
+const OFM_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+const OFM_ATTR = '<a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> &copy; <a href="https://www.openmaptiles.org/" target="_blank">OpenMapTiles</a> Data from <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>';
+let baseOrig = null; // each label layer's original text-field
+function labelExpr(lang) {
+  return lang === "th"
+    ? ["coalesce", ["get", "name:th"], ["get", "name"]]
+    : ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]];
+}
+function applyLabelLang() {
+  const gl = tiles && tiles.getMaplibreMap && tiles.getMaplibreMap();
+  if (!gl || !gl.isStyleLoaded()) return;
+  const layers = gl.getStyle().layers || [];
+  if (!baseOrig) {
+    baseOrig = {};
+    for (const l of layers) {
+      const tf = l.layout && l.layout["text-field"];
+      if (tf && JSON.stringify(tf).includes("name")) baseOrig[l.id] = tf;   // skip road-number shields
+    }
+  }
+  for (const id of Object.keys(baseOrig)) {
+    try { gl.setLayoutProperty(id, "text-field", labelExpr(S.lang)); } catch (_) {}
+  }
+}
 function setTiles() {
-  if (!map || tilesLang === S.lang) return;
-  if (tiles) map.removeLayer(tiles);
-  tiles = S.lang === "th"
-    ? L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: OSM_ATTR })
-    : L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-        maxZoom: 19, subdomains: "abcd", attribution: OSM_ATTR + ' &copy; <a href="https://carto.com/attributions">CARTO</a>'
-      });
-  tiles.addTo(map); tiles.bringToBack();
+  if (!map) return;
+  if (tiles && tilesLang === S.lang) return;
+  if (tiles && tiles.getMaplibreMap) { tilesLang = S.lang; applyLabelLang(); return; }
+  if (window.maplibregl && L.maplibreGL) {
+    tiles = L.maplibreGL({ style: OFM_STYLE, attribution: OFM_ATTR }).addTo(map);
+    const gl = tiles.getMaplibreMap();
+    gl.on("styledata", () => { if (!baseOrig) applyLabelLang(); });
+    gl.on("load", applyLabelLang);
+  } else {
+    tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: OSM_ATTR }).addTo(map);
+  }
   tilesLang = S.lang;
 }
 let fitted = false;
