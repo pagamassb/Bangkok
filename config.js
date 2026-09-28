@@ -11,7 +11,7 @@ window.APP_CONFIG = {
   // Login buttons. Set LINE_PROVIDER to "" to hide the LINE button
   // until you have set LINE up in Supabase (see SETUP.md, step 5).
   GOOGLE_ENABLED: true,
-  LINE_PROVIDER: "custom:line",
+  LINE_PROVIDER: "",
 
   // Shown in the header and browser tab.
   SITE_NAME: "Bangkok Social Floor"
