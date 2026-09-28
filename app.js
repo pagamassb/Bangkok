@@ -22,7 +22,7 @@ const STATIONS = [
 const S = {
   lang: "en", events: [], mine: new Set(), session: null, profile: null,
   style: "All", near: "", here: null, selected: null, mode: "view", confirmDel: false,
-  loaded: false, busy: false, guests: [], guestsFor: null
+  loaded: false, busy: false, guests: [], guestsFor: null, myRequest: null, requests: []
 };
 const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem("floor." + k); localStorage.setItem("floor." + k, v); } catch (_) { return null; } };
 S.lang = pref("lang") || ((navigator.language || "").toLowerCase().startsWith("th") ? "th" : "en");
@@ -47,6 +47,9 @@ function classText(e) {
   return parts.join(" · ") || t("classYes");
 }
 const isOrganiser = () => !!S.profile && ["organiser", "admin"].includes(S.profile.role);
+const isAdmin = () => !!S.profile && S.profile.role === "admin";
+// Organisers manage their own events; the admin manages all.
+const canEdit = e => !!e && (isAdmin() || (isOrganiser() && (DEMO || e.created_by === uid())));
 const uid = () => S.session?.user?.id || null;
 
 /* ============================================================
@@ -132,6 +135,10 @@ function renderAccount() {
     $("meRole").hidden = !isOrganiser();
   }
   $("addBtn").hidden = !isOrganiser();
+  $("joinBtn").hidden = isOrganiser();
+  $("reqBtn").hidden = !isAdmin();
+  const n = S.requests.length;
+  $("reqCount").textContent = n; $("reqCount").hidden = !n;
 }
 
 function renderClock() { $("clock").textContent = bkkTime(Date.now()); }
@@ -292,6 +299,8 @@ function renderMap(now) {
 function renderDetail(now) {
   const box = $("detail");
   if (S.mode === "edit" || S.mode === "new") { box.innerHTML = editorHtml(); return; }
+  if (S.mode === "join") { box.innerHTML = joinHtml(); return; }
+  if (S.mode === "requests") { box.innerHTML = requestsHtml(); return; }
   const e = S.events.find(x => x.id === S.selected);
   if (!e) { box.innerHTML = `<h3>${esc(t("details"))}</h3><p class="map-note">${esc(t("pickOne"))}</p>`; return; }
   const pills = status(e, now).map(([k, x]) => `<span class="pill ${k}">${esc(x)}</span>`).join("");
@@ -303,7 +312,7 @@ function renderDetail(now) {
     else action = `<button class="btn ${mine ? "" : "primary"}" data-rsvp="${esc(e.id)}">${esc(mine ? t("cancelRsvp") : t("goingBtn"))}</button>`;
   }
   let guests = "";
-  if (isOrganiser()) {
+  if (canEdit(e)) {
     if (S.guestsFor !== e.id) loadGuests(e.id);
     guests = `<h3>${esc(t("guestList"))} (${S.guestsFor === e.id ? S.guests.length : "…"})</h3>` +
       (S.guestsFor === e.id ? (S.guests.length ? `<div class="guests">${S.guests.map(g => `
@@ -326,9 +335,42 @@ function renderDetail(now) {
       ${action}
       <a class="btn" href="${esc(mapsUrl(e))}" target="_blank" rel="noopener">${esc(t("directions"))}</a>
       <button class="btn ghost" id="shareBtn">${esc(t("share"))}</button>
-      ${isOrganiser() ? `<button class="btn ghost" id="editBtn">${esc(t("edit"))}</button>` : ""}
+      ${canEdit(e) ? `<button class="btn ghost" id="editBtn">${esc(t("edit"))}</button>` : ""}
     </div>
     ${guests}`;
+}
+
+/* ---------- organiser sign-up ---------- */
+function joinHtml() {
+  const head = `<h3>${esc(t("joinTitle"))}</h3><p class="map-note">${esc(t("joinIntro"))}</p>`;
+  if (!uid()) return head + `<div class="row"><button class="btn primary" id="joinSignIn">${esc(t("joinSignIn"))}</button><button class="btn ghost" id="joinClose">${esc(t("close"))}</button></div>`;
+  if (isOrganiser()) return head + `<p><b>${esc(t("joinAlready"))}</b></p><div class="row"><button class="btn primary" id="addBtn2">${esc(t("addEvent"))}</button><button class="btn ghost" id="joinClose">${esc(t("close"))}</button></div>`;
+  const r = S.myRequest;
+  if (r && r.status === "pending") return head + `<div class="confirm">${esc(t("joinPending", r.org_name))}</div><div class="row"><button class="btn ghost" id="joinClose">${esc(t("close"))}</button></div>`;
+  if (r && r.status === "approved") return head + `<div class="confirm">${esc(t("joinApproved"))}</div><div class="row"><button class="btn primary" id="joinReload">${esc(t("reload"))}</button></div>`;
+  return head + (r && r.status === "declined" ? `<div class="confirm">${esc(t("joinDeclined"))}</div>` : "") + `
+  <form class="edit" id="joinForm">
+    <label class="full" for="j-org">${esc(t("jOrg"))}<input id="j-org" required maxlength="80" placeholder="Salsa BKK"></label>
+    <label class="full" for="j-contact">${esc(t("jContact"))} <span class="hint">${esc(t("jContactHint"))}</span><input id="j-contact" required maxlength="120" placeholder="LINE: salsabkk / 08x-xxx-xxxx"></label>
+    <fieldset class="full style-picks"><legend>${esc(t("jStyles"))}</legend>${STYLES.map((st, i) => `<label class="pick" for="j-st-${i}"><input type="checkbox" id="j-st-${i}" name="j-styles" value="${esc(st)}"><span class="dot" style="--c:${col(st)}"></span>${esc(st)}</label>`).join("")}</fieldset>
+    <label class="full" for="j-msg">${esc(t("jMsg"))}<textarea id="j-msg" rows="3" maxlength="500" placeholder="${esc(t("jMsgPh"))}"></textarea></label>
+    <div class="full row"><button class="btn primary" type="submit" id="joinSend">${esc(t("jSend"))}</button><button class="btn ghost" type="button" id="joinClose">${esc(t("cancel"))}</button></div>
+  </form>`;
+}
+
+function requestsHtml() {
+  const list = S.requests;
+  return `<h3>${esc(t("reqTitle"))} (${list.length})</h3>` + (list.length ? `<div class="reqs">${list.map(r => `
+    <div class="req">
+      <div class="req-head">${r.avatar ? `<img alt="" src="${esc(r.avatar)}">` : ""}<div><b>${esc(r.org_name)}</b><div class="map-note">${esc(r.name)} · ${esc(dayShort(r.created_at))}</div></div></div>
+      <dl class="facts">
+        <div><dt>${esc(t("reqContact"))}</dt><dd>${esc(r.contact)}</dd></div>
+        ${r.styles && r.styles.length ? `<div><dt>${esc(t("reqStyles"))}</dt><dd>${esc(r.styles.join(", "))}</dd></div>` : ""}
+        ${r.message ? `<div><dt>${esc(t("reqMsg"))}</dt><dd>${esc(r.message)}</dd></div>` : ""}
+      </dl>
+      <div class="row"><button class="btn primary small" data-approve="${esc(r.id)}">${esc(t("approve"))}</button><button class="btn small" data-decline="${esc(r.id)}">${esc(t("decline"))}</button></div>
+    </div>`).join("")}</div>` : `<p class="map-note">${esc(t("reqNone"))}</p>`) +
+    `<p class="map-note">${esc(t("reqShare"))} <b>${esc(location.origin + location.pathname)}#join</b></p><div class="row"><button class="btn ghost" id="joinClose">${esc(t("close"))}</button></div>`;
 }
 
 let draft = null;
@@ -371,7 +413,7 @@ function editorHtml() {
 function render() {
   const now = Date.now();
   renderClock(); renderAccount(); renderStyles(); renderNow(now); renderList(now); renderMap(now);
-  if (S.mode === "view") renderDetail(now);
+  if (S.mode === "view" || S.mode === "requests") renderDetail(now);
 }
 
 let toastT;
@@ -397,6 +439,65 @@ async function loadMe() {
   ]);
   S.profile = p || null;
   S.mine = new Set((r || []).map(x => x.event_id));
+}
+
+async function loadMyRequest() {
+  S.myRequest = null;
+  if (!uid() || DEMO) return;
+  const { data } = await sb.from("organiser_requests").select("*").eq("user_id", uid()).maybeSingle();
+  S.myRequest = data || null;
+}
+
+async function loadRequests() {
+  if (!isAdmin()) { S.requests = []; return; }
+  if (DEMO) { if (!S.demoReqDone) S.requests = [{ id: "r1", org_name: "Salsa BKK", name: "Nok", contact: "LINE: salsabkk", styles: ["Salsa", "Bachata"], message: "We run socials every Friday at Rooftop 11.", created_at: new Date().toISOString() }]; return; }
+  const { data } = await sb.from("organiser_requests").select("id, org_name, contact, styles, message, created_at, profiles(display_name, avatar_url)").eq("status", "pending").order("created_at");
+  S.requests = (data || []).map(r => ({ ...r, name: r.profiles?.display_name || "", avatar: r.profiles?.avatar_url }));
+}
+
+async function sendJoin(evt) {
+  evt.preventDefault();
+  if (S.busy) return;
+  const body = {
+    org_name: $("j-org").value.trim(), contact: $("j-contact").value.trim(),
+    styles: [...document.querySelectorAll('input[name="j-styles"]:checked')].map(x => x.value),
+    message: $("j-msg").value.trim() || null
+  };
+  S.busy = true; $("joinSend").disabled = true;
+  try {
+    if (DEMO) { S.myRequest = { ...body, status: "pending" }; }
+    else {
+      if (S.myRequest && S.myRequest.status === "declined") await sb.from("organiser_requests").delete().eq("id", S.myRequest.id);
+      const { data, error } = await sb.from("organiser_requests").insert(body).select().single();
+      if (error) throw error;
+      S.myRequest = data;
+    }
+    toast(t("joinSent"));
+  } catch (_) { toast(t("errSave")); }
+  S.busy = false; renderDetail(Date.now());
+}
+
+async function review(id, approve) {
+  if (S.busy) return; S.busy = true;
+  try {
+    if (!DEMO) { const { error } = await sb.rpc("review_organiser", { req_id: id, approve }); if (error) throw error; }
+    else S.demoReqDone = true;
+    S.requests = S.requests.filter(r => r.id !== id);
+    toast(approve ? t("approved") : t("declined"));
+  } catch (_) { toast(t("errSave")); }
+  S.busy = false; render();
+}
+
+function openJoin() {
+  S.mode = "join"; renderDetail(Date.now());
+  try { history.replaceState(null, "", "#join"); } catch (_) {}
+  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (uid()) loadMyRequest().then(() => { if (S.mode === "join") renderDetail(Date.now()); });
+}
+async function openRequests() {
+  S.mode = "requests"; renderDetail(Date.now());
+  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  await loadRequests(); render();
 }
 
 async function loadGuests(eventId) {
@@ -544,8 +645,8 @@ async function share() {
 async function signIn(provider) {
   if (DEMO) {
     S.session = { user: { id: "demo-user", user_metadata: { full_name: "Demo Organiser" } } };
-    S.profile = { display_name: "Demo Organiser", role: "organiser" };
-    $("signInDialog").close(); render(); return;
+    S.profile = { display_name: "Demo Organiser", role: "admin" };
+    $("signInDialog").close(); await loadRequests(); render(); if (S.mode === "join") renderDetail(Date.now()); return;
   }
   await sb.auth.signInWithOAuth({ provider, options: { redirectTo: location.origin + location.pathname + location.hash } });
 }
@@ -569,7 +670,14 @@ document.addEventListener("click", e => {
   const r = el.closest("[data-rsvp]"); if (r) { e.stopPropagation(); toggleRsvp(r.dataset.rsvp); return; }
   const tk = el.closest("[data-ticket]"); if (tk) { e.stopPropagation(); buyTicket(tk.dataset.ticket); return; }
   const chip = el.closest("[data-style]"); if (chip) { S.style = chip.dataset.style; pref("style", S.style); fitted = false; userMoved = false; render(); return; }
-  if (el.closest("#addBtn")) return startEdit(true);
+  if (el.closest("#addBtn") || el.closest("#addBtn2")) return startEdit(true);
+  if (el.closest("#joinBtn")) return openJoin();
+  if (el.closest("#reqBtn")) return openRequests();
+  if (el.closest("#joinSignIn")) return $("signInDialog").showModal();
+  if (el.closest("#joinReload")) return location.reload();
+  if (el.closest("#joinClose")) { S.mode = "view"; try { history.replaceState(null, "", location.pathname); } catch (_) {} render(); return; }
+  const ap = el.closest("[data-approve]"); if (ap) return review(ap.dataset.approve, true);
+  const dc = el.closest("[data-decline]"); if (dc) return review(dc.dataset.decline, false);
   if (el.closest("#editBtn")) return startEdit(false);
   if (el.closest("#shareBtn")) return share();
   if (el.closest("#cancelEdit")) { S.mode = "view"; render(); return; }
@@ -592,8 +700,8 @@ document.addEventListener("change", e => {
 document.addEventListener("keydown", e => {
   if ((e.key === "Enter" || e.key === " ") && e.target.matches?.(".ev")) { e.preventDefault(); select(e.target.dataset.id); }
 });
-document.addEventListener("submit", e => { if (e.target.id === "editForm") save(e); });
-window.addEventListener("hashchange", () => { const id = location.hash.slice(1); if (id && S.events.some(x => x.id === id)) select(id); });
+document.addEventListener("submit", e => { if (e.target.id === "editForm") save(e); if (e.target.id === "joinForm") sendJoin(e); });
+window.addEventListener("hashchange", () => { const id = location.hash.slice(1); if (id === "join") return openJoin(); if (id && S.events.some(x => x.id === id)) select(id); });
 
 /* ============================================================
    Start
@@ -607,18 +715,20 @@ async function boot() {
     sb.auth.onAuthStateChange(async (_evt, session) => {
       const changed = (session?.user?.id || null) !== uid();
       S.session = session;
-      if (changed) { await loadMe(); S.guestsFor = null; render(); }
+      if (changed) { await loadMe(); await Promise.all([loadMyRequest(), loadRequests()]); S.guestsFor = null; render(); if (S.mode === "join") renderDetail(Date.now()); }
     });
   }
   await Promise.all([loadEvents(), loadMe()]);
+  await Promise.all([loadMyRequest(), loadRequests()]);
   const hash = location.hash.slice(1);
   if (hash && S.events.some(e => e.id === hash)) S.selected = hash;
   else { const up = S.events.filter(e => ms(e.ends_at) > Date.now()).sort((a, b) => ms(a.starts_at) - ms(b.starts_at))[0]; if (up) S.selected = up.id; }
   render();
+  if (hash === "join") openJoin();
   subscribeLive();
   // Refresh countdowns and "live now" every 30 s; reload fully when the phone wakes up.
   setInterval(() => { if (S.mode === "view") render(); else { const n = Date.now(); renderClock(); renderNow(n); renderList(n); } }, 30000);
-  document.addEventListener("visibilitychange", async () => { if (!document.hidden && !DEMO) { await loadEvents(); await loadMe(); if (S.mode === "view") render(); } });
+  document.addEventListener("visibilitychange", async () => { if (!document.hidden && !DEMO) { await loadEvents(); await loadMe(); await loadRequests(); if (S.mode === "view" || S.mode === "requests") render(); else renderAccount(); } });
 }
 
 /* ---------- demo data (only used when config.js is empty) ---------- */
