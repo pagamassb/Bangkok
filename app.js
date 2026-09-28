@@ -33,8 +33,19 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const col = st => "var(" + (STYLE_VAR[st] || "--other") + ")";
 const t = (k, ...a) => { const v = STRINGS[S.lang][k] ?? STRINGS.en[k]; return typeof v === "function" ? v(...a) : v; };
+const LEVELS = ["beginner", "improver", "intermediate", "advanced", "all"];
 // An event can have several styles; older events only have one.
 const stylesOf = e => (Array.isArray(e.styles) && e.styles.length ? e.styles : [e.style || "Other"]);
+// "19:00–20:00 · Beginner, All levels · Sensual basics" (older events: just their class text)
+function classText(e) {
+  const on = e.class_enabled || e.lesson;
+  if (!on) return "";
+  const parts = [];
+  if (e.class_start) parts.push(e.class_end ? `${e.class_start}–${e.class_end}` : e.class_start);
+  if (Array.isArray(e.class_levels) && e.class_levels.length) parts.push(e.class_levels.map(l => t("lvl_" + l)).join(", "));
+  if (e.lesson) parts.push(e.lesson);
+  return parts.join(" · ") || t("classYes");
+}
 const isOrganiser = () => !!S.profile && ["organiser", "admin"].includes(S.profile.role);
 const uid = () => S.session?.user?.id || null;
 
@@ -166,7 +177,11 @@ function renderList(now) {
           <span class="style-tags">${stylesOf(e).map(st => `<span class="style-tag" style="--c:${col(st)}"><span class="dot"></span>${esc(st)}</span>`).join("")}</span>
           <span class="title">${esc(e.title)}</span>
           ${e.host ? `<span class="host">${esc(t("by"))} ${esc(e.host)}</span>` : ""}
-          <span class="sub"><span>${esc(e.venue)}${e.area ? ", " + esc(e.area) : ""}</span>${dist ? `<span>${esc(dist)}</span>` : ""}${e.lesson ? `<span>${esc(t("classAt"))} ${esc(e.lesson)}</span>` : ""}${e.price_text ? `<span>${esc(e.price_text)}</span>` : ""}</span>
+          <dl class="facts">
+            <div><dt>${esc(t("venue"))}</dt><dd>${esc(e.venue)}${e.area && e.area !== e.venue ? ` <span class="muted">· ${esc(e.area)}</span>` : ""}${dist ? ` <span class="muted">· ${esc(dist)}</span>` : ""}</dd></div>
+            ${classText(e) ? `<div><dt>${esc(t("klass"))}</dt><dd>${esc(classText(e))}</dd></div>` : ""}
+            ${e.price_text ? `<div><dt>${esc(t("entry"))}</dt><dd>${esc(e.price_text)}</dd></div>` : ""}
+          </dl>
           ${pills ? `<div class="pills">${pills}</div>` : ""}
         </div>
         <div class="right">${rsvpButton(e)}<span class="going">${esc(t("going", e.going_count || 0))}</span></div>
@@ -186,6 +201,13 @@ function initMap() {
   setTiles();
   markerLayer = L.layerGroup().addTo(map);
   hereLayer = L.layerGroup().addTo(map);
+  // Once the viewer drags or zooms, stop re-fitting automatically.
+  const box = $("map");
+  ["mousedown", "touchstart", "wheel"].forEach(ev => box.addEventListener(ev, () => { userMoved = true; }, { passive: true }));
+  // Keep the map correct when its box changes size (fonts loading, window resize, phone rotation).
+  if ("ResizeObserver" in window) {
+    let t; new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => { map.invalidateSize(); if (!userMoved) fitAll(); }, 150); }).observe(box);
+  }
 }
 // Base map: OpenFreeMap (free, no key, commercial use allowed), drawn with MapLibre.
 // Place and street names follow the site language: English or Thai.
@@ -198,10 +220,13 @@ function labelExpr(lang) {
     ? ["coalesce", ["get", "name:th"], ["get", "name"]]
     : ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]];
 }
+let labelsLang = null;
 function applyLabelLang() {
   const gl = tiles && tiles.getMaplibreMap && tiles.getMaplibreMap();
-  if (!gl || !gl.isStyleLoaded()) return;
-  const layers = gl.getStyle().layers || [];
+  if (!gl) return;
+  let style; try { style = gl.getStyle(); } catch (_) { return; }
+  const layers = (style && style.layers) || [];
+  if (!layers.length) return;
   if (!baseOrig) {
     baseOrig = {};
     for (const l of layers) {
@@ -209,9 +234,11 @@ function applyLabelLang() {
       if (tf && JSON.stringify(tf).includes("name")) baseOrig[l.id] = tf;   // skip road-number shields
     }
   }
+  let ok = true;
   for (const id of Object.keys(baseOrig)) {
-    try { gl.setLayoutProperty(id, "text-field", labelExpr(S.lang)); } catch (_) {}
+    try { gl.setLayoutProperty(id, "text-field", labelExpr(S.lang)); } catch (_) { ok = false; }
   }
+  if (ok) labelsLang = S.lang;
 }
 function setTiles() {
   if (!map) return;
@@ -220,14 +247,23 @@ function setTiles() {
   if (window.maplibregl && L.maplibreGL) {
     tiles = L.maplibreGL({ style: OFM_STYLE, attribution: OFM_ATTR }).addTo(map);
     const gl = tiles.getMaplibreMap();
-    gl.on("styledata", () => { if (!baseOrig) applyLabelLang(); });
+    gl.on("styledata", () => { if (labelsLang !== S.lang) applyLabelLang(); });
     gl.on("load", applyLabelLang);
+    gl.on("idle", () => { if (labelsLang !== S.lang) applyLabelLang(); });
   } else {
     tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: OSM_ATTR }).addTo(map);
   }
   tilesLang = S.lang;
 }
-let fitted = false;
+let fitted = false, lastPts = [], userMoved = false;
+// Zoom the map so every visible venue fits. Recalculate the map box size first,
+// because the page layout may have changed since the map was created.
+function fitAll() {
+  if (!map || !lastPts.length) return;
+  map.invalidateSize();
+  if (lastPts.length === 1) map.setView(lastPts[0], 14);
+  else map.fitBounds(lastPts, { padding: [24, 24], maxZoom: 14 });
+}
 function renderMap(now) {
   if (!map) return;
   markerLayer.clearLayers(); hereLayer.clearLayers();
@@ -248,7 +284,8 @@ function renderMap(now) {
     L.circleMarker([o.lat, o.lng], { radius: 6, color: css.getPropertyValue("--ink").trim(), weight: 3, fillColor: css.getPropertyValue("--surface").trim(), fillOpacity: 1 })
       .bindTooltip(esc(o.label), { direction: "bottom", offset: [0, 8] }).addTo(hereLayer);
   }
-  if (!fitted && pts.length) { map.fitBounds(pts, { padding: [24, 24], maxZoom: 14 }); fitted = true; }
+  lastPts = pts;
+  if (!fitted && pts.length) { fitAll(); fitted = true; }
 }
 
 /* ---------- detail panel ---------- */
@@ -278,7 +315,7 @@ function renderDetail(now) {
     ${pills ? `<div class="pills">${pills}</div>` : ""}
     <dl class="kv">
       <dt>${esc(t("when"))}</dt><dd>${esc(dayShort(e.starts_at))}, ${bkkTime(e.starts_at)}–${bkkTime(e.ends_at)}</dd>
-      ${e.lesson ? `<dt>${esc(t("klass"))}</dt><dd>${esc(e.lesson)}</dd>` : ""}
+      ${classText(e) ? `<dt>${esc(t("klass"))}</dt><dd>${esc(classText(e))}</dd>` : ""}
       <dt>${esc(t("venue"))}</dt><dd>${esc(e.venue)}${e.area ? ", " + esc(e.area) : ""}${dist ? " · " + esc(dist) : ""}</dd>
       ${e.price_text ? `<dt>${esc(t("entry"))}</dt><dd>${esc(e.price_text)}</dd>` : ""}
       ${e.host ? `<dt>${esc(t("host"))}</dt><dd>${safeUrl(e.host_link) ? `<a href="${esc(safeUrl(e.host_link))}" target="_blank" rel="noopener">${esc(e.host)} ↗</a>` : esc(e.host)}</dd>` : ""}
@@ -304,9 +341,17 @@ function editorHtml() {
     <fieldset class="full style-picks"><legend>${esc(t("fStyle"))}</legend>${STYLES.map((st, i) => `<label class="pick" for="f-st-${i}"><input type="checkbox" id="f-st-${i}" name="f-styles" value="${esc(st)}" ${stylesOf(d).includes(st) ? "checked" : ""}><span class="dot" style="--c:${col(st)}"></span>${esc(st)}</label>`).join("")}</fieldset>
     <label for="f-status">${esc(t("fStatus"))}<select id="f-status"><option value="on" ${d.status !== "cancelled" ? "selected" : ""}>${esc(t("fOn"))}</option><option value="cancelled" ${d.status === "cancelled" ? "selected" : ""}>${esc(t("fCancelled"))}</option></select></label>
     <label for="f-date">${esc(t("fDate"))}<input id="f-date" type="date" required value="${esc(d.date)}"></label>
-    <label for="f-lesson">${esc(t("fLesson"))}<input id="f-lesson" placeholder="Beginner 19:15" value="${esc(d.lesson)}"></label>
     <label for="f-start">${esc(t("fStart"))}<input id="f-start" type="time" required value="${esc(d.start)}"></label>
     <label for="f-end">${esc(t("fEnd"))}<input id="f-end" type="time" required value="${esc(d.end)}"></label>
+    <fieldset class="full class-box">
+      <label class="pick big" for="f-hasclass"><input type="checkbox" id="f-hasclass" ${d.class_enabled ? "checked" : ""}>${esc(t("fHasClass"))}</label>
+      <div class="class-bits" id="f-classbits" ${d.class_enabled ? "" : "hidden"}>
+        <label for="f-cstart">${esc(t("fClassFrom"))}<input id="f-cstart" type="time" value="${esc(d.class_start || "")}"></label>
+        <label for="f-cend">${esc(t("fClassTo"))}<input id="f-cend" type="time" value="${esc(d.class_end || "")}"></label>
+        <div class="full style-picks" role="group" aria-label="${esc(t("fLevels"))}"><span class="picks-label">${esc(t("fLevels"))}</span>${LEVELS.map((l, i) => `<label class="pick" for="f-lv-${i}"><input type="checkbox" id="f-lv-${i}" name="f-levels" value="${l}" ${(d.class_levels || []).includes(l) ? "checked" : ""}>${esc(t("lvl_" + l))}</label>`).join("")}</div>
+        <label class="full" for="f-lesson">${esc(t("fTopic"))}<input id="f-lesson" placeholder="${esc(t("fTopicPh"))}" value="${esc(d.lesson || "")}"></label>
+      </div>
+    </fieldset>
     <label for="f-venue">${esc(t("fVenue"))}<input id="f-venue" required value="${esc(d.venue)}"></label>
     <label for="f-area">${esc(t("fArea"))}<input id="f-area" placeholder="Thong Lo" value="${esc(d.area)}"></label>
     <label class="full" for="f-coords">${esc(t("fCoords"))} <span class="hint">${esc(t("fCoordsHint"))}</span><input id="f-coords" inputmode="decimal" placeholder="13.7262, 100.5801" value="${d.lat != null && d.lng != null ? esc(d.lat + ", " + d.lng) : ""}"></label>
@@ -422,10 +467,10 @@ function buyTicket() {
 
 function startEdit(isNew) {
   if (isNew) {
-    draft = { title: "", style: "Salsa", styles: ["Salsa"], status: "on", date: bkkDate(Date.now()), start: "20:00", end: "23:30", venue: "", area: "", lesson: "", price_text: "", host: S.profile?.display_name || "", host_link: "", note: "", lat: null, lng: null };
+    draft = { title: "", style: "Salsa", styles: ["Salsa"], status: "on", date: bkkDate(Date.now()), start: "20:00", end: "23:30", venue: "", area: "", lesson: "", class_enabled: false, class_start: "19:00", class_end: "20:00", class_levels: [], price_text: "", host: S.profile?.display_name || "", host_link: "", note: "", lat: null, lng: null };
   } else {
     const e = S.events.find(x => x.id === S.selected); if (!e) return;
-    draft = { ...e, date: bkkDate(e.starts_at), start: bkkTime(e.starts_at), end: bkkTime(e.ends_at) };
+    draft = { ...e, class_enabled: !!(e.class_enabled || e.lesson), date: bkkDate(e.starts_at), start: bkkTime(e.starts_at), end: bkkTime(e.ends_at) };
   }
   S.mode = isNew ? "new" : "edit"; S.confirmDel = false; renderDetail(Date.now());
   $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -438,13 +483,16 @@ async function save(evt) {
   const v = id => $(id).value.trim();
   const picked = [...document.querySelectorAll('input[name="f-styles"]:checked')].map(x => x.value);
   if (!picked.length) { toast(t("pickStyle")); return; }
+  const hasClass = $("f-hasclass").checked;
   const nums = v("f-coords").split(/[,\s]+/).map(Number).filter(n => Number.isFinite(n) && n !== 0);
   const starts = toIso(v("f-date"), v("f-start"));
   let ends = toIso(v("f-date"), v("f-end"));
   if (ms(ends) <= ms(starts)) ends = new Date(ms(ends) + 86400e3).toISOString();   // runs past midnight
   const body = {
     title: v("f-title"), style: picked[0], styles: picked, status: v("f-status"), starts_at: starts, ends_at: ends,
-    venue: v("f-venue"), area: v("f-area") || null, lesson: v("f-lesson") || null, price_text: v("f-price") || null,
+    venue: v("f-venue"), area: v("f-area") || null, class_enabled: hasClass, class_start: hasClass ? (v("f-cstart") || null) : null, class_end: hasClass ? (v("f-cend") || null) : null,
+    class_levels: hasClass ? [...document.querySelectorAll('input[name="f-levels"]:checked')].map(x => x.value) : [],
+    lesson: hasClass ? (v("f-lesson") || null) : null, price_text: v("f-price") || null,
     host: v("f-host") || null, host_link: safeUrl(v("f-hostlink")) || null, note: v("f-note") || null,
     lat: nums.length === 2 ? nums[0] : null, lng: nums.length === 2 ? nums[1] : null
   };
@@ -520,7 +568,7 @@ document.addEventListener("click", e => {
   const el = e.target;
   const r = el.closest("[data-rsvp]"); if (r) { e.stopPropagation(); toggleRsvp(r.dataset.rsvp); return; }
   const tk = el.closest("[data-ticket]"); if (tk) { e.stopPropagation(); buyTicket(tk.dataset.ticket); return; }
-  const chip = el.closest("[data-style]"); if (chip) { S.style = chip.dataset.style; pref("style", S.style); fitted = false; render(); return; }
+  const chip = el.closest("[data-style]"); if (chip) { S.style = chip.dataset.style; pref("style", S.style); fitted = false; userMoved = false; render(); return; }
   if (el.closest("#addBtn")) return startEdit(true);
   if (el.closest("#editBtn")) return startEdit(false);
   if (el.closest("#shareBtn")) return share();
@@ -538,6 +586,7 @@ document.addEventListener("click", e => {
 });
 document.addEventListener("change", e => {
   if (e.target.id === "near") { S.near = e.target.value; S.here = null; pref("near", S.near); renderStatic(); render(); }
+  if (e.target.id === "f-hasclass") $("f-classbits").hidden = !e.target.checked;
   if (e.target.dataset.checkin) checkIn(e.target.dataset.checkin, e.target.checked);
 });
 document.addEventListener("keydown", e => {
@@ -576,9 +625,9 @@ async function boot() {
 function demoEvents() {
   const today = bkkDate(Date.now());
   const day = n => { const d = new Date(`${today}T12:00:00+07:00`); d.setUTCDate(d.getUTCDate() + n); return bkkDate(d); };
-  const mk = (i, title, style, d, s, e, lesson, venue, area, lat, lng, price, extra = {}) => {
+  const mk = (i, title, style, d, s, e, lessonTxt, venue, area, lat, lng, price, extra = {}) => {
     const starts = toIso(day(d), s); let ends = toIso(day(d), e); if (ms(ends) <= ms(starts)) ends = new Date(ms(ends) + 86400e3).toISOString();
-    return { id: "demo-" + i, title, style, status: "on", starts_at: starts, ends_at: ends, lesson, venue, area, lat, lng, price_text: price, host: ["Clave Crew","Sala Bachata","Hop Hall Swing","Tango Abrazo BKK","Ginga Kiz","Rooftop Latin","Slot WCS","Onda Zouk"][i], note: null, going_count: [12, 8, 15, 6, 9, 21, 7, 5][i] || 0, is_sample: true, tickets_enabled: false, ...extra };
+    return { id: "demo-" + i, title, style, status: "on", starts_at: starts, ends_at: ends, ...(lessonTxt ? { class_enabled: true, class_start: (lessonTxt.match(/\d\d:\d\d/) || [null])[0], class_levels: [/taster|Beginner|basics/i.test(lessonTxt) ? "beginner" : /Open/i.test(lessonTxt) ? "all" : "improver"] } : {}), venue, area, lat, lng, price_text: price, host: ["Clave Crew","Sala Bachata","Hop Hall Swing","Tango Abrazo BKK","Ginga Kiz","Rooftop Latin","Slot WCS","Onda Zouk"][i], note: null, going_count: [12, 8, 15, 6, 9, 21, 7, 5][i] || 0, is_sample: true, tickets_enabled: false, ...extra };
   };
   return [
     mk(0, "Salsa Social", "Salsa", 0, "20:00", "00:30", "Beginner 19:15", "Casa Clave", "Thong Lo", 13.7262, 100.5801, "300 THB incl. drink"),
