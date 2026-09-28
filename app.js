@@ -178,15 +178,27 @@ function renderList(now) {
 }
 
 /* ---------- map (Leaflet + OpenStreetMap) ---------- */
-let map, markerLayer, hereLayer;
+let map, markerLayer, hereLayer, tiles, tilesLang;
+const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 function initMap() {
   if (!window.L) { $("map").textContent = "Map unavailable"; return; }
   map = L.map("map", { zoomControl: true, attributionControl: true }).setView([13.742, 100.548], 12);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  }).addTo(map);
+  setTiles();
   markerLayer = L.layerGroup().addTo(map);
   hereLayer = L.layerGroup().addTo(map);
+}
+// English: CARTO Voyager (street and place names in English).
+// Thai: standard OpenStreetMap (names in Thai).
+function setTiles() {
+  if (!map || tilesLang === S.lang) return;
+  if (tiles) map.removeLayer(tiles);
+  tiles = S.lang === "th"
+    ? L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: OSM_ATTR })
+    : L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+        maxZoom: 19, subdomains: "abcd", attribution: OSM_ATTR + ' &copy; <a href="https://carto.com/attributions">CARTO</a>'
+      });
+  tiles.addTo(map); tiles.bringToBack();
+  tilesLang = S.lang;
 }
 let fitted = false;
 function renderMap(now) {
@@ -493,7 +505,7 @@ document.addEventListener("click", e => {
   if (el.closest("#googleBtn")) return signIn("google");
   if (el.closest("#lineBtn")) return signIn(CFG.LINE_PROVIDER);
   if (el.closest("#signOutBtn")) { if (DEMO) { S.session = null; S.profile = null; render(); } else sb.auth.signOut(); return; }
-  if (el.closest("#langBtn")) { S.lang = S.lang === "en" ? "th" : "en"; pref("lang", S.lang); renderStatic(); render(); return; }
+  if (el.closest("#langBtn")) { S.lang = S.lang === "en" ? "th" : "en"; pref("lang", S.lang); setTiles(); renderStatic(); render(); return; }
   if (el.closest("#locateBtn")) return locate();
   const item = el.closest("[data-id]"); if (item && !el.closest("a,input,label")) select(item.dataset.id);
 });
