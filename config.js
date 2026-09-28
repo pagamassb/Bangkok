@@ -14,5 +14,5 @@ window.APP_CONFIG = {
   LINE_PROVIDER: "",
 
   // Shown in the header and browser tab.
-  SITE_NAME: "Bangkok Social Floor"
+  SITE_NAME: "Bangkok Social"
 };
